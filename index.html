@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>qrbeam — send long text as an animated QR code</title>
+  <meta name="description" content="Beam a large body of text from one screen to a phone camera using an animated QR code. Works offline, nothing leaves your devices.">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#0f1115">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <h1>qrbeam</h1>
+  <p class="muted">Send a large body of text from one screen to a phone, using an animated QR code. No network, no account: the text travels through the camera and never leaves your devices.</p>
+
+  <div class="choices">
+    <a class="choice" href="send.html">
+      <div class="big">Send →</div>
+      <div class="muted">Paste text or open a .txt file. It plays as an animated QR code.</div>
+    </a>
+    <a class="choice" href="receive.html">
+      <div class="big">Receive →</div>
+      <div class="muted">Point your camera at the animation until it fills up. Then copy, share or save the text.</div>
+    </a>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">How it works</h2>
+    <p>The text is compressed, split into chunks and sent as a stream of QR frames. After the first pass, every frame is a random mix of chunks (a <em>fountain code</em>), so the receiver can rebuild the text from <strong>any</strong> frames it catches, not specific ones. Missed or blurry frames just mean you hold the camera a moment longer.</p>
+    <p class="muted small">Rough capacity: 1,000 words of English ≈ 2 KB compressed ≈ 3–4 frames. A 200 KB text file goes across in about 10–15 seconds.</p>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">On iPhone</h2>
+    <p class="muted">Open <strong>Receive</strong> in Safari and allow the camera. For offline use, tap <strong>Share → Add to Home Screen</strong> once; it then works with no connection.</p>
+  </div>
+
+  <p class="muted small">Open source · <a href="https://github.com/vishwas513/qrbeam">github.com/vishwas513/qrbeam</a></p>
+</main>
+<script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');</script>
+</body>
+</html>

@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Receive · qrbeam</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header class="bar"><a class="home" href="./">← qrbeam</a><h1>Receive</h1></header>
+
+  <section id="scanView">
+    <div class="viewport">
+      <video id="video" playsinline muted autoplay></video>
+      <div class="frame" id="frame"></div>
+      <div class="hint" id="hint">Tap “Start camera”, then fill the square with the animated code</div>
+    </div>
+    <div class="progress"><div id="bar"></div></div>
+    <div class="stats">
+      <div class="stat"><b id="sProgress">—</b><span>received</span></div>
+      <div class="stat"><b id="sFrames">0</b><span>frames read</span></div>
+      <div class="stat"><b id="sRate">0</b><span>reads / second</span></div>
+    </div>
+    <p id="err" class="error"></p>
+    <div class="actions">
+      <button id="startBtn">Start camera</button>
+      <button id="resetBtn" class="secondary">Reset</button>
+    </div>
+    <p class="muted small">Hold the phone steady 20–40 cm from the screen. Any frames will do, so there's no need to catch them all. If reads per second stays at 0, move closer or ask the sender to lower the density.</p>
+  </section>
+
+  <section id="doneView" class="hidden">
+    <div class="card">
+      <b style="color:var(--ok)">✓ Received</b> <span class="muted" id="doneInfo"></span>
+    </div>
+    <textarea id="out" readonly></textarea>
+    <div class="actions">
+      <button id="copyBtn">Copy</button>
+      <button id="shareBtn" class="secondary">Share…</button>
+      <button id="saveBtn" class="secondary">Save .txt</button>
+      <button id="againBtn" class="secondary">Scan another</button>
+    </div>
+  </section>
+</main>
+
+<script src="fountain.js"></script>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const video = $('video');
+const PROCESS_SIZE = 1080;              // px of the centre square handed to the decoder (full 1080p — dense codes need every pixel)
+const worker = new Worker('decode-worker.js');
+const canvas = document.createElement('canvas');
+canvas.width = canvas.height = PROCESS_SIZE;
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+let stream = null, busy = false, running = false, decoder = new Fountain.Decoder();
+let reads = 0, readTimes = [], resultText = '';
+
+function setError(msg) { $('err').textContent = msg || ''; }
+
+async function startCamera() {
+  setError('');
+  if (!window.isSecureContext) return setError('The camera needs HTTPS. Open this page from its https:// address.');
+  if (!navigator.mediaDevices?.getUserMedia) return setError('This browser cannot access the camera.');
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+    });
+  } catch (e) {
+    return setError(e.name === 'NotAllowedError'
+      ? 'Camera permission was denied. Allow it in Settings → Safari → Camera (or the site settings) and try again.'
+      : `Could not start the camera: ${e.message}`);
+  }
+  video.srcObject = stream;
+  await video.play().catch(() => {});
+  running = true;
+  $('startBtn').textContent = 'Camera on';
+  $('startBtn').disabled = true;
+  $('hint').textContent = 'Fill the square with the code';
+  requestAnimationFrame(loop);
+}
+
+function stopCamera() {
+  running = false;
+  stream?.getTracks().forEach((t) => t.stop());
+  stream = null; video.srcObject = null;
+  $('startBtn').textContent = 'Start camera';
+  $('startBtn').disabled = false;
+}
+
+function loop() {
+  if (!running) return;
+  if (!busy && video.readyState >= 2 && video.videoWidth) {
+    // Crop the centre square of the camera image (what the user sees in the viewport).
+    const vw = video.videoWidth, vh = video.videoHeight, side = Math.min(vw, vh);
+    // Alternate between full and 80% scale: jsQR has blind spots at particular
+    // pixels-per-module ratios, and the two scales never share one.
+    loop.flip = !loop.flip;
+    const out = Math.round(Math.min(PROCESS_SIZE, side) * (loop.flip ? 1 : 0.8));
+    if (canvas.width !== out) canvas.width = canvas.height = out;
+    ctx.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, out, out);
+    const img = ctx.getImageData(0, 0, out, out);
+    busy = true;
+    worker.postMessage({ buf: img.data.buffer, w: out, h: out }, [img.data.buffer]);
+  }
+  requestAnimationFrame(loop);
+}
+
+worker.onmessage = async (e) => {
+  busy = false;
+  const bytes = e.data.bytes;
+  if (!bytes || !running) return;
+  const status = decoder.add(bytes);
+  if (status === 'invalid') { $('hint').textContent = 'That QR code isn’t from qrbeam'; return; }
+  reads++;
+  const now = performance.now();
+  readTimes.push(now);
+  readTimes = readTimes.filter((t) => now - t < 2000);
+  flash();
+  render();
+  if (decoder.done) await finish();
+};
+
+function flash() {
+  const f = $('frame');
+  f.classList.add('hit');
+  clearTimeout(flash.t);
+  flash.t = setTimeout(() => f.classList.remove('hit'), 90);
+}
+
+function render() {
+  const pct = Math.floor(decoder.progress * 100);
+  $('bar').style.width = `${pct}%`;
+  $('sProgress').textContent = decoder.K ? `${decoder.solved} / ${decoder.K}` : '—';
+  $('sFrames').textContent = reads;
+  $('sRate').textContent = (readTimes.length / 2).toFixed(1);
+  if (decoder.K) $('hint').textContent = `Receiving… ${pct}%`;
+}
+
+async function finish() {
+  stopCamera();
+  try {
+    resultText = await decoder.text();
+  } catch (e) {
+    setError(e.message);
+    resetAll();
+    return;
+  }
+  const bytes = new TextEncoder().encode(resultText).length;
+  $('doneInfo').textContent = `${resultText.length.toLocaleString()} characters · ${(bytes / 1024).toFixed(1)} KB · ${reads} frames read`;
+  $('out').value = resultText;
+  $('scanView').classList.add('hidden');
+  $('doneView').classList.remove('hidden');
+  if (!navigator.share) $('shareBtn').classList.add('hidden');
+}
+
+function resetAll() {
+  decoder = new Fountain.Decoder();
+  reads = 0; readTimes = [];
+  render();
+  $('hint').textContent = running ? 'Fill the square with the code' : 'Tap “Start camera”, then fill the square with the animated code';
+}
+
+$('startBtn').onclick = startCamera;
+$('resetBtn').onclick = () => { setError(''); resetAll(); };
+$('againBtn').onclick = () => {
+  resultText = ''; $('out').value = '';
+  $('doneView').classList.add('hidden'); $('scanView').classList.remove('hidden');
+  resetAll(); startCamera();
+};
+$('copyBtn').onclick = async () => {
+  try { await navigator.clipboard.writeText(resultText); $('copyBtn').textContent = 'Copied ✓'; }
+  catch { $('out').select(); document.execCommand('copy'); $('copyBtn').textContent = 'Copied ✓'; }
+  setTimeout(() => ($('copyBtn').textContent = 'Copy'), 1500);
+};
+$('shareBtn').onclick = () => navigator.share({ text: resultText }).catch(() => {});
+$('saveBtn').onclick = () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([resultText], { type: 'text/plain;charset=utf-8' }));
+  a.download = `qrbeam-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+document.addEventListener('visibilitychange', () => { if (document.hidden && running) stopCamera(); });
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>

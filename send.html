@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Send · qrbeam</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header class="bar"><a class="home" href="./">← qrbeam</a><h1>Send</h1></header>
+
+  <textarea id="text" placeholder="Paste or type the text to send…" spellcheck="false"></textarea>
+  <div class="actions">
+    <label class="btn secondary" style="margin:0;color:var(--text)">Open .txt file<input id="file" type="file" accept=".txt,.md,.csv,.json,text/*" hidden></label>
+    <button id="clear" class="secondary">Clear</button>
+  </div>
+
+  <div class="row">
+    <div>
+      <label for="density">Density (bytes per frame)</label>
+      <select id="density">
+        <option value="300">Low · 300 (easiest to scan)</option>
+        <option value="600" selected>Medium · 600</option>
+        <option value="900">High · 900</option>
+        <option value="1200">Max · 1200 (hold the phone close)</option>
+      </select>
+    </div>
+    <div>
+      <label for="fps">Speed: <span id="fpsLabel">8</span> frames / second</label>
+      <input id="fps" type="range" min="2" max="20" value="8">
+    </div>
+    <div>
+      <label for="ecc">Error correction</label>
+      <select id="ecc">
+        <option value="L" selected>Low (denser)</option>
+        <option value="M">Medium (handles glare)</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="stats" id="stats"></div>
+  <p id="err" class="error"></p>
+
+  <div class="actions">
+    <button id="start" disabled>Start beaming</button>
+  </div>
+  <p class="muted small">Tip: turn screen brightness up, and if scanning is slow use a lower density or speed.</p>
+</main>
+
+<div id="stage" class="hidden">
+  <button class="stop" id="stop">Stop</button>
+  <canvas id="qr"></canvas>
+  <div class="caption" id="caption"></div>
+</div>
+
+<script src="vendor/qrcode.js"></script>
+<script src="fountain.js"></script>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const text = $('text'), density = $('density'), fps = $('fps'), ecc = $('ecc');
+let encoder = null, buildToken = 0, timer = null, seq = 0, wakeLock = null;
+
+const fmtBytes = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(2)} MB`;
+const fmtSecs = (s) => s < 60 ? `${Math.ceil(s)} s` : `${Math.floor(s / 60)} min ${Math.ceil(s % 60)} s`;
+
+async function rebuild() {
+  const token = ++buildToken;
+  $('err').textContent = '';
+  const value = text.value;
+  if (!value) { encoder = null; $('stats').innerHTML = ''; $('start').disabled = true; return; }
+  try {
+    const enc = await Fountain.encodeText(value, Number(density.value) - Fountain.HEADER);
+    if (token !== buildToken) return;            // a newer edit superseded this one
+    encoder = enc;
+    // Measure the real QR size for this density.
+    const qr = makeQR(enc.frame(0));
+    const version = (qr.getModuleCount() - 17) / 4;
+    const secs = (enc.K + 2) / Number(fps.value);
+    $('stats').innerHTML = [
+      [fmtBytes(enc.rawLength), 'text'],
+      [fmtBytes(enc.length), enc.flags & 1 ? 'compressed' : 'not compressed'],
+      [enc.K, enc.K === 1 ? 'frame needed' : 'frames needed'],
+      ['~' + fmtSecs(secs), 'to receive (no misses)'],
+      ['v' + version, 'QR version'],
+    ].map(([b, s]) => `<div class="stat"><b>${b}</b><span>${s}</span></div>`).join('');
+    $('start').disabled = false;
+  } catch (e) {
+    if (token !== buildToken) return;
+    encoder = null; $('start').disabled = true; $('err').textContent = e.message;
+  }
+}
+
+function makeQR(bytes) {
+  const qr = qrcode(0, ecc.value);
+  qr.addData(String.fromCharCode.apply(null, bytes), 'Byte');   // library default maps chars 0–255 straight to bytes
+  qr.make();
+  return qr;
+}
+
+function draw(bytes) {
+  const qr = makeQR(bytes), n = qr.getModuleCount(), quiet = 4, total = n + quiet * 2;
+  const dpr = window.devicePixelRatio || 1;
+  const avail = Math.min(innerWidth, innerHeight - 50) * 0.96 * dpr;
+  const scale = Math.max(1, Math.floor(avail / total));   // whole device pixels per module = crisp edges
+  const canvas = $('qr'), size = total * scale;
+  if (canvas.width !== size) { canvas.width = canvas.height = size; canvas.style.width = canvas.style.height = `${size / dpr}px`; }
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = '#000';
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) {
+    if (qr.isDark(r, c)) ctx.fillRect((c + quiet) * scale, (r + quiet) * scale, scale, scale);
+  }
+}
+
+function tick() {
+  draw(encoder.frame(seq));
+  const pass = seq < encoder.K ? `first pass ${seq + 1}/${encoder.K}` : `mixing frames · ${seq + 1} sent`;
+  $('caption').textContent = `${pass} · ${fps.value} fps · keep going until the phone says done`;
+  seq = (seq + 1) >>> 0;
+}
+
+async function start() {
+  if (!encoder) return;
+  seq = 0;
+  $('stage').classList.remove('hidden');
+  try { await document.documentElement.requestFullscreen?.(); } catch {}
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+  tick();
+  timer = setInterval(tick, 1000 / Number(fps.value));
+}
+function stop() {
+  clearInterval(timer); timer = null;
+  $('stage').classList.add('hidden');
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  wakeLock?.release?.(); wakeLock = null;
+}
+
+$('file').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (f) { text.value = await f.text(); rebuild(); }
+  e.target.value = '';
+});
+$('clear').onclick = () => { text.value = ''; rebuild(); };
+$('start').onclick = start;
+$('stop').onclick = stop;
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && timer) stop(); });
+fps.addEventListener('input', () => { $('fpsLabel').textContent = fps.value; rebuild(); if (timer) { clearInterval(timer); timer = setInterval(tick, 1000 / Number(fps.value)); } });
+let debounce;
+text.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(rebuild, 250); });
+density.addEventListener('change', rebuild);
+ecc.addEventListener('change', rebuild);
+addEventListener('resize', () => { if (timer && encoder) draw(encoder.frame(seq)); });
+if (!Fountain.canCompress) $('err').textContent = 'This browser cannot compress, so text will be sent uncompressed (slower).';
+rebuild();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>
